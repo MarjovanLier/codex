@@ -109,6 +109,8 @@ pub async fn run_codex_tool_session(
         outgoing,
         id,
         running_requests_id_to_codex_uuid,
+        conversation_id,
+        true, // is_initial_call
     )
     .await;
 }
@@ -145,6 +147,8 @@ pub async fn run_codex_tool_session_reply(
         outgoing,
         request_id,
         running_requests_id_to_codex_uuid,
+        conversation_id,
+        false, // is_initial_call
     )
     .await;
 }
@@ -154,6 +158,8 @@ async fn run_codex_tool_session_inner(
     outgoing: Arc<OutgoingMessageSender>,
     request_id: RequestId,
     running_requests_id_to_codex_uuid: Arc<Mutex<HashMap<RequestId, ConversationId>>>,
+    conversation_id: ConversationId,
+    is_initial_call: bool,
 ) {
     let request_id_str = match &request_id {
         RequestId::String(s) => s.clone(),
@@ -194,9 +200,12 @@ async fn run_codex_tool_session_inner(
                     }
                     EventMsg::Error(err_event) => {
                         // Return a response to conclude the tool call when the Codex session reports an error (e.g., interruption).
-                        let result = json!({
+                        let mut result = json!({
                             "error": err_event.message,
                         });
+                        if is_initial_call {
+                            result["conversationId"] = json!(conversation_id.to_string());
+                        }
                         outgoing.send_response(request_id.clone(), result).await;
                         break;
                     }
@@ -225,6 +234,13 @@ async fn run_codex_tool_session_inner(
                             Some(msg) => msg,
                             None => "".to_string(),
                         };
+                        let structured_content = if is_initial_call {
+                            Some(json!({
+                                "conversationId": conversation_id.to_string(),
+                            }))
+                        } else {
+                            None
+                        };
                         let result = CallToolResult {
                             content: vec![ContentBlock::TextContent(TextContent {
                                 r#type: "text".to_string(),
@@ -232,7 +248,7 @@ async fn run_codex_tool_session_inner(
                                 annotations: None,
                             })],
                             is_error: None,
-                            structured_content: None,
+                            structured_content,
                         };
                         outgoing.send_response(request_id.clone(), result).await;
                         // unregister the id so we don't keep it in the map
@@ -293,6 +309,15 @@ async fn run_codex_tool_session_inner(
                 }
             }
             Err(e) => {
+                let structured_content = if is_initial_call {
+                    // TODO(mbolin): Could present the error in a more
+                    // structured way.
+                    Some(json!({
+                        "conversationId": conversation_id.to_string(),
+                    }))
+                } else {
+                    None
+                };
                 let result = CallToolResult {
                     content: vec![ContentBlock::TextContent(TextContent {
                         r#type: "text".to_string(),
@@ -300,9 +325,7 @@ async fn run_codex_tool_session_inner(
                         annotations: None,
                     })],
                     is_error: Some(true),
-                    // TODO(mbolin): Could present the error in a more
-                    // structured way.
-                    structured_content: None,
+                    structured_content,
                 };
                 outgoing.send_response(request_id.clone(), result).await;
                 break;
